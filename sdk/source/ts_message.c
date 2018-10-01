@@ -64,9 +64,7 @@ TsStatus_t ts_message_create( TsMessageRef_t * message ) {
 			/* clear all, assume root (avoiding memset) */
 			snprintf(_ts_message_nodes[i].name, TS_MESSAGE_MAX_KEY_SIZE, "$root");
 			_ts_message_nodes[i].type = TsTypeMessage;
-			for (int j = 0; j < TS_MESSAGE_MAX_BRANCHES; j++) {
-				_ts_message_nodes[i].value._xfields[j] = NULL;
-			}
+			_ts_message_nodes[i].value._xfields = NULL;
 
 			/* set the return value (root) */
 			*message = &_ts_message_nodes[i];
@@ -419,12 +417,12 @@ TsStatus_t ts_message_get_at( TsMessageRef_t array, size_t index, TsMessageRef_t
 	if( array == NULL || array->type != TsTypeArray ) {
 		return TsStatusErrorPreconditionFailed;
 	}
-	if( index >= TS_MESSAGE_MAX_BRANCHES || array->value._xfields[ index ] == NULL) {
+	if( index >= array->value._xfields.length || array->value._xfields.elements[ index ] == NULL) {
 		return TsStatusErrorIndexOutOfRange;
 	}
 
 	/* return indexed value */
-	*item = array->value._xfields[ index ];
+	*item = array->value._xfields.elements[ index ];
 	return TsStatusOk;
 }
 
@@ -747,6 +745,56 @@ static TsStatus_t _ts_message_initialize()
 #endif
 
 /**
+ * Low-level utility function to directly return the value at a certain field index.
+ * We assume this is an array or message type (caller must check). The value is returned by reference and not copied.
+ * If we are past the end of the array, just return null.
+ */
+static TsMessageRef_t _ts_message_value_at( TsMessageRef_t message, size_t index ) {
+	if (index >= message->value._xfields.length) {
+		return NULL;
+	}
+	return message->value._xfields.elements[index];
+}
+
+/**
+ * Low-level utility function to return the length of the fields array.
+ * We assume this is an array or message type (caller must check).
+ * Note that some of these elements may be null.
+ */
+static size_t _ts_message_length( TsMessageRef_t message ) {
+	return message->value._xfields.length;
+}
+
+
+/**
+ * Low-level utility function to directly put a value at a certain field index, possibly resizing the fields array to
+ * accommodate it. We assume this is an array or message type (caller must check). The value is set by reference and not copied.
+ */
+static TsStatus_t _ts_message_put_at( TsMessageRef_t message, size_t index, TsMessageRef_t item ) {
+	int i;
+	int length = message->value._xfields.length;
+	if (index >= length) {
+		// Resize the fields array.
+		int newLength = (index / TS_MESSAGE_CHUNK_SIZE + 1) * TS_MESSAGE_CHUNK_SIZE;
+		TsMessageRef_t *new = ts_platform_malloc(sizeof(TsMessageRef_t) * newLength);
+		if (new == NULL) {
+			return TsStatusErrorOutOfMemory;
+		}
+		memset(new, 0x00, sizeof(TsMessageRef_t) * newLength);
+		for (i = 0; i < length; i++) {
+			new[i] = message->value._xfields.elements[i];
+		}
+		ts_platform_free(message->value._xfields.elements, sizeof(TsMessageRef_t) * length);
+		message->value._xfields.elements = new;
+		message->value._xfields.length = newLength;
+	}
+	// Put the value.
+	message->value._xfields.elements[index] = item;
+	return TsStatusOk;
+}
+
+
+/**
  * Set the current message node to the given type and value. The optional field may be used to set a node relative
  * to the one given, e.g., as in a JSON object field.
  * @param message
@@ -771,22 +819,25 @@ static TsStatus_t _ts_message_set( TsMessageRef_t message, TsPathNode_t field, T
 		return TsStatusErrorPreconditionFailed;
 	}
 
+	int length = message->value._xfields.length;
+
 	/* search for the relevant node */
 	/* normally assume we're adding or modifying a field, */
 	/* however we will check for primitives during the first iteration */
-	for( int i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
+	for( int i = 0; i <= length; i++ ) {
 
 		/* check for primitives */
 		TsMessageRef_t branch = message;
 		if( field != NULL) {
 
 			/* the path node is either new or has been established previously */
-			branch = message->value._xfields[ i ];
+			branch = _ts_message_value_at( message, i );
+
 			if( branch == NULL || strcmp( field, branch->name ) == 0 ) {
 
 				/* destroy the old message if overwriting a new value */
 				if( branch != NULL) {
-					message->value._xfields[ i ] = NULL;
+					_ts_message_put_at( message, i, NULL );
 					ts_message_destroy( branch );
 				}
 
@@ -799,7 +850,7 @@ static TsStatus_t _ts_message_set( TsMessageRef_t message, TsPathNode_t field, T
 				case TsTypeString:
 				case TsTypeNull: {
 
-					/* (re)create a new messsage */
+					/* (re)create a new message */
 					TsStatus_t status = ts_message_create( &branch );
 					if( status != TsStatusOk ) {
 						ts_status_debug( "_ts_message_set: failed to create new primitive(%d)\n", status );
@@ -810,7 +861,7 @@ static TsStatus_t _ts_message_set( TsMessageRef_t message, TsPathNode_t field, T
 				case TsTypeMessage:
 				case TsTypeArray: {
 
-					/* copy given messsage */
+					/* copy given message */
 					TsStatus_t status = ts_message_create_copy((TsMessageRef_t) value, &branch );
 					if( status != TsStatusOk ) {
 						ts_status_debug( "_ts_message_set: failed to copy message or array(%d)\n", status );
@@ -828,7 +879,11 @@ static TsStatus_t _ts_message_set( TsMessageRef_t message, TsPathNode_t field, T
 			}
 
 			/* (re)set this field array to the updated branch */
-			message->value._xfields[ i ] = branch;
+			TsStatus_t status = _ts_message_put_at (message, i, branch);
+			if( status != TsStatusOk ) {
+				ts_status_debug( "_ts_message_set: failed to copy message or array(%d)\n", status );
+				return status;
+			}
 		}
 
 		/* (re)set the field name and type */
@@ -982,9 +1037,10 @@ static TsStatus_t _ts_message_encode_debug( TsMessageRef_t message, int depth ) 
 		break;
 
 	case TsTypeArray: {
+		int length = _ts_message_length(message);
 		ts_status_debug( "%s:array\n", message->name );
-		for( int i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
-			TsMessageRef_t branch = message->value._xfields[ i ];
+		for( int i = 0; i < length; i++ ) {
+			TsMessageRef_t branch = _ts_message_value_at(message, i);
 			if( branch == NULL) {
 				break;
 			}
@@ -994,9 +1050,10 @@ static TsStatus_t _ts_message_encode_debug( TsMessageRef_t message, int depth ) 
 		break;
 	}
 	case TsTypeMessage: {
+		int length = _ts_message_length(message);
 		ts_status_debug( "%s:message( BEGIN )\n", message->name );
-		for( int i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
-			TsMessageRef_t branch = message->value._xfields[ i ];
+		for( int i = 0; i < length; i++ ) {
+			TsMessageRef_t branch = _ts_message_value_at(i);
 			if( branch == NULL) {
 				break;
 			}
@@ -1045,8 +1102,9 @@ static TsStatus_t _ts_message_encode_json( TsMessageRef_t message, uint8_t * buf
 
 	case TsTypeArray: {
 		snprintf( xbuffer + strlen( xbuffer ), xbuffer_size - strlen( xbuffer ), "[" );
-		for( int i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
-			TsMessageRef_t branch = message->value._xfields[ i ];
+		int length = _ts_message_length(message);
+		for( int i = 0; i < length; i++ ) {
+			TsMessageRef_t branch = _ts_message_value_at(message, i);
 			if( branch == NULL) {
 				break;
 			}
@@ -1070,8 +1128,9 @@ static TsStatus_t _ts_message_encode_json( TsMessageRef_t message, uint8_t * buf
 	}
 	case TsTypeMessage: {
 		snprintf( xbuffer + strlen( xbuffer ), xbuffer_size - strlen( xbuffer ), "{" );
-		for( int i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
-			TsMessageRef_t branch = message->value._xfields[ i ];
+		int length = _ts_message_length(message);
+		for( int i = 0; i < length; i++ ) {
+			TsMessageRef_t branch = _ts_message_value_at(message, i);
 			if( branch == NULL) {
 				break;
 			} else {
@@ -1142,7 +1201,7 @@ static TsStatus_t _ts_message_encode_cbor( TsMessageRef_t message, CborEncoder *
 		cbor_encoder_create_array( encoder, &array, length );
 		for( int i = 0; i < (int)length; i++ ) {
 
-			TsMessageRef_t xmessage = message->value._xfields[ i ];
+			TsMessageRef_t xmessage = ts_message_value_at( message, i );
 			switch( xmessage->type ) {
 			case TsTypeInteger:
 				cbor_encode_int( &array, xmessage->value._xinteger );
@@ -1197,7 +1256,7 @@ static TsStatus_t _ts_message_encode_cbor( TsMessageRef_t message, CborEncoder *
 		CborEncoder map;
 		cbor_encoder_create_map( encoder, &map, length );
 		for( int i = 0; i < length; i++ ) {
-			_ts_message_encode_cbor( message->value._xfields[ i ], &map, buffer, buffer_size );
+			_ts_message_encode_cbor( ts_message_value_at( message, i ), &map, buffer, buffer_size );
 		}
 		cbor_encoder_close_container( encoder, &map );
 		break;
@@ -1433,7 +1492,7 @@ static TsStatus_t _ts_message_encode_ts_cbor( TsMessageRef_t message, CborEncode
 		cbor_encoder_create_array( encoder, &array, length );
 		for( int i = 0; i < (int)length; i++ ) {
 
-			TsMessageRef_t xmessage = message->value._xfields[ i ];
+			TsMessageRef_t xmessage = ts_message_value_at( message, i );
 			switch( xmessage->type ) {
 			case TsTypeInteger:
 				cbor_encode_int( &array, xmessage->value._xinteger );
@@ -1461,7 +1520,7 @@ static TsStatus_t _ts_message_encode_ts_cbor( TsMessageRef_t message, CborEncode
 				CborEncoder xmap;
 				cbor_encoder_create_map( &array, &xmap, xlength );
 				for( int xi = 0; xi < (int)xlength; xi++ ) {
-					_ts_message_encode_ts_cbor( xmessage->value._xfields[ xi ], &xmap, depth+1, buffer, buffer_size );
+					_ts_message_encode_ts_cbor( ts_message_value_at( xmessage, xi ), &xmap, depth+1, buffer, buffer_size );
 				}
 				cbor_encoder_close_container( &array, &xmap );
 				break;
@@ -1488,7 +1547,7 @@ static TsStatus_t _ts_message_encode_ts_cbor( TsMessageRef_t message, CborEncode
 		CborEncoder map;
 		cbor_encoder_create_map( encoder, &map, length );
 		for( int i = 0; i < (int)length; i++ ) {
-			_ts_message_encode_ts_cbor( message->value._xfields[ i ], &map, depth+1, buffer, buffer_size );
+			_ts_message_encode_ts_cbor( ts_message_value_at( message, i ), &map, depth+1, buffer, buffer_size );
 		}
 		cbor_encoder_close_container( encoder, &map );
 		break;

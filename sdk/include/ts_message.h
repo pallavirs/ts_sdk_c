@@ -60,7 +60,10 @@
 // maximum number of branches allowed per node 
 // for TsTypeMessage, limits the number of attributes per JSON/CBOR object 
 // for TsTypeArray, limits the maximum size of the array. 
-#define TS_MESSAGE_MAX_BRANCHES     20
+#define TS_MESSAGE_MAX_BRANCHES     1024
+
+// Chunk size in which message arrays and object field arrays will be allocated.
+#define TS_MESSAGE_CHUNK_SIZE 32
 
 // total number of nodes available for messages 
 #define TS_MESSAGE_MAX_NODES        (TS_MESSAGE_MAX_BRANCHES * TS_MESSAGE_MAX_ROOTS)
@@ -116,6 +119,12 @@ typedef void *TsValue_t;
 // message string (zero terminated)
 typedef char *TsString_t;
 
+// Represents a re-sizeable array
+typedef struct TsArray {
+	TsMessageRef_t *elements;
+	int length; /* number of available positions */
+} TsArray_t;
+
 // field value 
 // note, union size will take the largest attribute 
 typedef union TsField *TsFieldRef_t;
@@ -124,8 +133,7 @@ typedef union {
 	float _xfloat;
 	bool _xboolean;
 	TsString_t _xstring;
-	// TODO - switch to linked list 
-	TsMessageRef_t _xfields[TS_MESSAGE_MAX_BRANCHES];
+	TsArray_t _xfields;
 } TsField_t;
 
 // a single message node binding 
