@@ -125,17 +125,18 @@ TsStatus_t ts_message_create_copy( TsMessageRef_t message, TsMessageRef_t * valu
 
 		case TsTypeMessage:
 		case TsTypeArray:
-			for( int i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
-				if( message->value._xfields[ i ] == NULL) {
+			int length = _ts_message_length( message );
+			for( int i = 0; i < length; i++ ) {
+				if( _ts_message_value_at( message, i ) == NULL) {
 					break;
 				}
 				TsMessageRef_t field;
-				status = ts_message_create_copy( message->value._xfields[ i ], &field );
+				status = ts_message_create_copy( _ts_message_value_at( message, i ), &field );
 				if( status != TsStatusOk ) {
 					ts_message_destroy( *value );
 					return status;
 				}
-				( *value )->value._xfields[ i ] = field;
+				_ts_message_put_at( *value, i, field );
 			}
 			break;
 
@@ -237,11 +238,15 @@ TsStatus_t ts_message_destroy( TsMessageRef_t message ) {
 			ts_platform_free( message->value._xstring, 0 );
 		}
 		if( message->type == TsTypeArray || message->type == TsTypeMessage ) {
-			for( int i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
-				if( message->value._xfields[ i ] != NULL) {
-					ts_message_destroy( message->value._xfields[ i ] );
+			// Destroy all elements of the fields array
+			int length = _ts_message_length( message );
+			for( int i = 0; i < length; i++ ) {
+				if( _ts_message_value_at( message, i ) != NULL) {
+					ts_message_destroy( _ts_message_value_at( message, i ) );
+					_ts_message_put_at( message, i, NULL );
 				}
 			}
+			ts_platform_free( message->value._xfields.elements, message->value._xfields.elements * sizeof(TsMessageRef_t) );
 		}
 #ifdef TS_MESSAGE_STATIC_MEMORY
 		message->references = 0;
@@ -250,7 +255,7 @@ TsStatus_t ts_message_destroy( TsMessageRef_t message ) {
 			ts_status_debug("ts_message_destroy: all messages that had been created are now destroyed\n");
 		}
 #else
-		free( message );
+		ts_platform_free( message , sizeof(TsMessage_t) );
 #endif
 	}
 
@@ -341,8 +346,9 @@ TsStatus_t ts_message_has( TsMessageRef_t message, TsPathNode_t field, TsMessage
 	if( message->type != TsTypeMessage ) {
 		return TsStatusErrorPreconditionFailed;
 	}
-	for( int i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
-		TsMessageRef_t object = message->value._xfields[ i ];
+	int length = _ts_message_length( message );
+	for( int i = 0; i < length; i++ ) {
+		TsMessageRef_t object = _ts_message_value_at( message, i );
 		if( object == NULL) {
 			return TsStatusErrorNotFound;
 		}
@@ -392,6 +398,7 @@ TsStatus_t ts_message_get_message( TsMessageRef_t message, TsPathNode_t field, T
 /* ts_message_get_size */
 TsStatus_t ts_message_get_size( TsMessageRef_t array, size_t * size ) {
 
+	int i;
 	/* check preconditions */
 	if( array == NULL || ( array->type != TsTypeArray && array->type != TsTypeMessage ) ) {
 		*size = 0;
@@ -399,14 +406,13 @@ TsStatus_t ts_message_get_size( TsMessageRef_t array, size_t * size ) {
 	}
 
 	/* return last available position */
-	/* TODO - should manage a cached length attribute instead */
-	*size = TS_MESSAGE_MAX_BRANCHES;
-	for( size_t i = 0; i < TS_MESSAGE_MAX_BRANCHES; i++ ) {
-		if( array->value._xfields[ i ] == NULL) {
-			*size = i;
+	*size = _ts_message_length( message );
+	for( i = *size; i > 0; i-- ) {
+		if( array->value._xfields[ i - 1 ] != NULL) {
 			break;
 		}
 	}
+	*size = i;
 	return TsStatusOk;
 }
 
@@ -417,12 +423,12 @@ TsStatus_t ts_message_get_at( TsMessageRef_t array, size_t index, TsMessageRef_t
 	if( array == NULL || array->type != TsTypeArray ) {
 		return TsStatusErrorPreconditionFailed;
 	}
-	if( index >= array->value._xfields.length || array->value._xfields.elements[ index ] == NULL) {
+	if( index >= _ts_message_length ( array ) || _ts_message_value_at( array, index ) == NULL ) {
 		return TsStatusErrorIndexOutOfRange;
 	}
 
 	/* return indexed value */
-	*item = array->value._xfields.elements[ index ];
+	*item = _ts_message_value_at( array, index );
 	return TsStatusOk;
 }
 
@@ -448,13 +454,13 @@ TsStatus_t ts_message_set_at( TsMessageRef_t array, size_t index, TsMessageRef_t
 	/* remove old,... */
 	TsMessageRef_t current = array->value._xfields[ index ];
 	if( current != NULL) {
-		array->value._xfields[ index ] = NULL;
+		_ts_message_put_at( array, index, NULL );
 		ts_message_destroy( current );
 	}
 
 	/* ...and set new and return */
 	ts_message_create_copy( item, &current );
-	array->value._xfields[ index ] = current;
+	_ts_message_put_at( array, index, current );
 	return TsStatusOk;
 }
 
