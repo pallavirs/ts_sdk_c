@@ -136,7 +136,11 @@ TsStatus_t ts_message_create_copy( TsMessageRef_t message, TsMessageRef_t * valu
 					ts_message_destroy( *value );
 					return status;
 				}
-				_ts_message_put_at( *value, i, field );
+				status = _ts_message_put_at( *value, i, field );
+				if( status != TsStatusOk ) {
+					ts_message_destroy( *value );
+					return status;
+				}
 			}
 			break;
 
@@ -243,7 +247,6 @@ TsStatus_t ts_message_destroy( TsMessageRef_t message ) {
 			for( int i = 0; i < length; i++ ) {
 				if( _ts_message_value_at( message, i ) != NULL) {
 					ts_message_destroy( _ts_message_value_at( message, i ) );
-					_ts_message_put_at( message, i, NULL );
 				}
 			}
 			ts_platform_free( message->value._xfields.elements, message->value._xfields.elements * sizeof(TsMessageRef_t) );
@@ -405,10 +408,10 @@ TsStatus_t ts_message_get_size( TsMessageRef_t array, size_t * size ) {
 		return TsStatusErrorPreconditionFailed;
 	}
 
-	/* return last available position */
+	/* return last available position, backing up from the end of the last chunk */
 	*size = _ts_message_length( message );
 	for( i = *size; i > 0; i-- ) {
-		if( array->value._xfields[ i - 1 ] != NULL) {
+		if( _ts_message_value_at( message, i - 1 ) != NULL) {
 			break;
 		}
 	}
@@ -441,7 +444,7 @@ TsStatus_t ts_message_set_at( TsMessageRef_t array, size_t index, TsMessageRef_t
 	}
 	size_t length;
 	ts_message_get_size( array, &length );
-	if( index >= TS_MESSAGE_MAX_BRANCHES || index > length ) {
+	if( index >= TS_MESSAGE_MAX_BRANCHES ) {
 		return TsStatusErrorIndexOutOfRange;
 	}
 
@@ -452,15 +455,21 @@ TsStatus_t ts_message_set_at( TsMessageRef_t array, size_t index, TsMessageRef_t
 	}
 
 	/* remove old,... */
-	TsMessageRef_t current = array->value._xfields[ index ];
+	TsMessageRef_t current = _ts_message_get_at( array, index );
 	if( current != NULL) {
-		_ts_message_put_at( array, index, NULL );
+		TsStatus_t status = _ts_message_put_at( array, index, NULL );
+		if ( status != TsStatusOk ) {
+			return status;
+		}
 		ts_message_destroy( current );
 	}
 
 	/* ...and set new and return */
 	ts_message_create_copy( item, &current );
-	_ts_message_put_at( array, index, current );
+	TsStatus_t status = _ts_message_put_at( array, index, current );
+	if ( status != TsStatusOk ) {
+		return status;
+	}
 	return TsStatusOk;
 }
 
@@ -780,6 +789,12 @@ static TsStatus_t _ts_message_put_at( TsMessageRef_t message, size_t index, TsMe
 	int i;
 	int length = message->value._xfields.length;
 	if (index >= length) {
+
+		if (item == NULL) {
+			// Actually we don't need to do anything.
+			return TsStatusOk;
+		}
+
 		// Resize the fields array.
 		int newLength = (index / TS_MESSAGE_CHUNK_SIZE + 1) * TS_MESSAGE_CHUNK_SIZE;
 		TsMessageRef_t *new = ts_platform_malloc(sizeof(TsMessageRef_t) * newLength);
@@ -825,7 +840,7 @@ static TsStatus_t _ts_message_set( TsMessageRef_t message, TsPathNode_t field, T
 		return TsStatusErrorPreconditionFailed;
 	}
 
-	int length = message->value._xfields.length;
+	int length = _ts_message_length( message );
 
 	/* search for the relevant node */
 	/* normally assume we're adding or modifying a field, */
@@ -843,7 +858,11 @@ static TsStatus_t _ts_message_set( TsMessageRef_t message, TsPathNode_t field, T
 
 				/* destroy the old message if overwriting a new value */
 				if( branch != NULL) {
-					_ts_message_put_at( message, i, NULL );
+					TsStatus status = _ts_message_put_at( message, i, NULL );
+					if ( status != TsStatusOk ) {
+						ts_status_debug( "_ts_message_set: failed to destroy old value(%d)\n", status );
+						return status;
+					}
 					ts_message_destroy( branch );
 				}
 
@@ -887,7 +906,7 @@ static TsStatus_t _ts_message_set( TsMessageRef_t message, TsPathNode_t field, T
 			/* (re)set this field array to the updated branch */
 			TsStatus_t status = _ts_message_put_at (message, i, branch);
 			if( status != TsStatusOk ) {
-				ts_status_debug( "_ts_message_set: failed to copy message or array(%d)\n", status );
+				ts_status_debug( "_ts_message_set: failed to put new value into message or array(%d)\n", status );
 				return status;
 			}
 		}
@@ -1235,7 +1254,7 @@ static TsStatus_t _ts_message_encode_cbor( TsMessageRef_t message, CborEncoder *
 				CborEncoder xmap;
 				cbor_encoder_create_map( &array, &xmap, xlength );
 				for( int xi = 0; xi < (int)xlength; xi++ ) {
-					_ts_message_encode_cbor( xmessage->value._xfields[ xi ], &xmap, buffer, buffer_size );
+					_ts_message_encode_cbor( _ts_message_value_at( xmessage, xi ), &xmap, buffer, buffer_size );
 				}
 				cbor_encoder_close_container( &array, &xmap );
 				break;
